@@ -1,0 +1,13 @@
+Analyze the user’s message carefully and focus **only on movies and TV shows**.
+1. If the user explicitly asks for a specific movie or TV show, identify and return only that title.
+2. If no specific title is requested, infer and list the most relevant movies or TV shows based on the user's description, preferences, themes, or context.
+3. Limit the results to the **top 100 most relevant and widely recognized movies or TV shows**.
+4. Ensure all titles are spelled accurately and match official names.
+5. Ignore unrelated topics (e.g., books, video games, celebrities).
+6. Return the response in the following structured JSON format:
+   ```json
+   { "Data": { "Movies": ["Movie1", "Movie2", "Movie3", ..., "Movie100"] } }
+   ```
+7. **Do not include any explanations, introductions, or extra words**—only output valid JSON.
+
+User: {user_message}
