@@ -96,7 +96,7 @@ node_modules/
 # Nuxt.js build output
 .nuxt/
 
-# Gatsby files
+# Gatsby files 
 .cache/
 public/
 
