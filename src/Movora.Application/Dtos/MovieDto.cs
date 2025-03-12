@@ -2,9 +2,10 @@ namespace Movora.Application.Dtos
 {
     public class MovieDto
     {
-        public int Id { get; set; }
         public string Title { get; set; }
         public string Description { get; set; }
-        // Add other movie properties as needed
+        public string ThumbnailUrl { get; set; }
+        public List<string> Cast { get; set; }
+        public decimal Rating { get; set; }
     }
 }
