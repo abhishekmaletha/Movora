@@ -1,0 +1,58 @@
+version: '3.9'
+
+services:
+  movora-webapi:
+    build:
+      context: ..
+      dockerfile: DockerCompose/services/movora-webapi/Dockerfile
+    ports:
+      - "5228:80"
+    depends_on:
+      - postgres
+      - keycloak
+
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_DB: KeycloakDB
+      POSTGRES_USER: MovoraAdmin
+      POSTGRES_PASSWORD: "M0v0r@Admin"
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    container_name: keycloak
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL_HOST: postgres
+      KC_DB_URL_DATABASE: KeycloakDB
+      KC_DB_USERNAME: MovoraAdmin
+      KC_DB_PASSWORD: "M0v0r@Admin"
+    command: start-dev
+    depends_on:
+      - postgres
+    ports:
+      - "8080:8080"
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: "admin@example.com"
+      PGADMIN_DEFAULT_PASSWORD: "admin"
+    depends_on:
+      - postgres
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+volumes:
+  pgdata:
+  pgadmin_data:
