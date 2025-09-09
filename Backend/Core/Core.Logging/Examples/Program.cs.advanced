@@ -1,0 +1,293 @@
+using Core.Logging.Extensions;
+using Core.Logging.Models;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add controllers
+builder.Services.AddControllers();
+
+// Add Swagger/OpenAPI
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+// Add Core.Logging - ADVANCED CONFIGURATION
+if (builder.Environment.IsDevelopment())
+{
+    // Development: Enhanced console logging with debug level
+    builder.Services.AddCoreLoggingDevelopment("MyAdvancedApp");
+}
+else if (builder.Environment.IsProduction())
+{
+    // Production: Database + limited console
+    builder.Services.AddCoreLoggingProduction(
+        connectionString: builder.Configuration.GetConnectionString("LoggingDb")!,
+        applicationName: "MyAdvancedApp");
+}
+else
+{
+    // Staging/Other: Custom configuration
+    builder.Services.AddCoreLogging(options =>
+    {
+        options.MinimumLevel = LogLevel.Information;
+        options.ApplicationName = "MyAdvancedApp";
+        options.Environment = builder.Environment.EnvironmentName;
+        options.IncludeMachineName = true;
+        options.IncludeProcessInfo = true;
+        
+        // Enable multiple strategies
+        options.Strategies.Enabled = new List<string> { "Console", "File" };
+        
+        // Console with colors
+        options.Console.Enabled = true;
+        options.Console.UseColors = true;
+        options.Console.MinimumLevel = LogLevel.Information;
+        
+        // File logging for staging
+        options.File.Enabled = true;
+        options.File.Path = "logs/staging-.log";
+        options.File.RollingInterval = RollingInterval.Day;
+        options.File.MinimumLevel = LogLevel.Debug;
+        
+        // Disable database for staging
+        options.Database.Enabled = false;
+        
+        // Add default properties
+        options.DefaultProperties.Add("Version", "2.0.0");
+        options.DefaultProperties.Add("Environment", builder.Environment.EnvironmentName);
+    });
+}
+
+var app = builder.Build();
+
+// Configure the HTTP request pipeline
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+
+// Add correlation ID middleware (example)
+app.Use(async (context, next) =>
+{
+    var correlationId = context.Request.Headers["X-Correlation-ID"].FirstOrDefault() 
+                      ?? Guid.NewGuid().ToString();
+    context.Items["CorrelationId"] = correlationId;
+    context.Response.Headers.Add("X-Correlation-ID", correlationId);
+    await next();
+});
+
+app.MapControllers();
+
+// Example endpoints with logging
+app.MapGet("/", (IAppLogger logger, HttpContext context) =>
+{
+    var correlationId = context.Items["CorrelationId"]?.ToString();
+    
+    using var scope = logger.BeginScope($"Request-{correlationId}");
+    
+    logger.LogInformation("Processing root request", new 
+    { 
+        CorrelationId = correlationId,
+        UserAgent = context.Request.Headers.UserAgent.ToString(),
+        Method = context.Request.Method,
+        Path = context.Request.Path
+    });
+    
+    return new { Message = "Hello from Advanced Core.Logging!", CorrelationId = correlationId };
+});
+
+app.MapPost("/data", (DataRequest request, IAppLogger logger, HttpContext context) =>
+{
+    var correlationId = context.Items["CorrelationId"]?.ToString();
+    
+    using var scope = logger.BeginScope($"ProcessData-{correlationId}");
+    
+    logger.LogInformation("Processing data request", new 
+    { 
+        CorrelationId = correlationId,
+        RequestId = request.Id,
+        DataSize = request.Data?.Length ?? 0
+    });
+    
+    try
+    {
+        // Simulate processing
+        if (string.IsNullOrEmpty(request.Data))
+        {
+            logger.LogWarning("Empty data received", new { CorrelationId = correlationId });
+            return Results.BadRequest("Data is required");
+        }
+        
+        // Simulate some processing time
+        Thread.Sleep(100);
+        
+        logger.LogInformation("Data processed successfully", new 
+        { 
+            CorrelationId = correlationId,
+            ProcessedLength = request.Data.Length
+        });
+        
+        return Results.Ok(new { Success = true, ProcessedAt = DateTime.UtcNow });
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to process data", new 
+        { 
+            CorrelationId = correlationId,
+            RequestId = request.Id
+        });
+        
+        return Results.Problem("Internal server error");
+    }
+});
+
+app.MapGet("/health", (IAppLogger logger) =>
+{
+    logger.LogDebug("Health check requested");
+    return new { Status = "Healthy", Timestamp = DateTime.UtcNow };
+});
+
+app.MapGet("/simulate-error", (IAppLogger logger, HttpContext context) =>
+{
+    var correlationId = context.Items["CorrelationId"]?.ToString();
+    
+    using var scope = logger.BeginScope($"SimulateError-{correlationId}");
+    
+    logger.LogWarning("Simulating error for testing purposes", new 
+    { 
+        CorrelationId = correlationId,
+        RequestedBy = context.Request.Headers.UserAgent.ToString()
+    });
+    
+    try
+    {
+        throw new InvalidOperationException("This is a simulated error for testing logging");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Simulated error occurred", new 
+        { 
+            CorrelationId = correlationId,
+            ErrorType = "Simulated"
+        });
+        
+        return Results.Problem("Simulated error occurred");
+    }
+});
+
+app.Run();
+
+// Data model for the example
+public record DataRequest(int Id, string? Data);
+
+// Example Service Class with Dependency Injection:
+/*
+
+public interface IUserService
+{
+    Task<User> GetUserAsync(int id);
+    Task<User> CreateUserAsync(CreateUserRequest request);
+}
+
+public class UserService : IUserService
+{
+    private readonly IAppLogger<UserService> _logger;
+    private readonly IUserRepository _repository;
+
+    public UserService(IAppLogger<UserService> logger, IUserRepository repository)
+    {
+        _logger = logger;
+        _repository = repository;
+    }
+
+    public async Task<User> GetUserAsync(int id)
+    {
+        using var scope = _logger.BeginScope($"GetUser-{id}");
+        
+        _logger.LogInformation("Retrieving user", new { UserId = id });
+        
+        try
+        {
+            var user = await _repository.GetByIdAsync(id);
+            
+            if (user == null)
+            {
+                _logger.LogWarning("User not found", new { UserId = id });
+                throw new NotFoundException($"User with ID {id} not found");
+            }
+            
+            _logger.LogInformation("User retrieved successfully", new 
+            { 
+                UserId = user.Id, 
+                Email = user.Email,
+                LastLogin = user.LastLoginAt
+            });
+            
+            return user;
+        }
+        catch (Exception ex) when (!(ex is NotFoundException))
+        {
+            _logger.LogError(ex, "Failed to retrieve user", new { UserId = id });
+            throw;
+        }
+    }
+
+    public async Task<User> CreateUserAsync(CreateUserRequest request)
+    {
+        using var scope = _logger.BeginScope($"CreateUser-{request.Email}");
+        
+        _logger.LogInformation("Creating new user", new 
+        { 
+            Email = request.Email, 
+            FirstName = request.FirstName,
+            RequestId = request.RequestId
+        });
+
+        try
+        {
+            // Validate request
+            if (await _repository.ExistsByEmailAsync(request.Email))
+            {
+                _logger.LogWarning("User creation failed - email already exists", new 
+                { 
+                    Email = request.Email,
+                    RequestId = request.RequestId
+                });
+                throw new ValidationException("User with this email already exists");
+            }
+
+            var user = new User
+            {
+                Email = request.Email,
+                FirstName = request.FirstName,
+                LastName = request.LastName,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            await _repository.CreateAsync(user);
+            
+            _logger.LogInformation("User created successfully", new 
+            { 
+                UserId = user.Id,
+                Email = user.Email,
+                RequestId = request.RequestId,
+                CreatedAt = user.CreatedAt
+            });
+
+            return user;
+        }
+        catch (Exception ex) when (!(ex is ValidationException))
+        {
+            _logger.LogError(ex, "Failed to create user", new 
+            { 
+                Email = request.Email,
+                RequestId = request.RequestId
+            });
+            throw;
+        }
+    }
+}
+
+*/

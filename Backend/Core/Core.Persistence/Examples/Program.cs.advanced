@@ -1,0 +1,483 @@
+using Core.Persistence.Attributes;
+using Core.Persistence.BulkOperations;
+using Core.Persistence.ConnectionFactory;
+using Core.Persistence.Extensions;
+using Core.Persistence.Helpers;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+using System.Data;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services to the container
+builder.Services.AddControllers();
+
+// Add Core.Persistence - ADVANCED SETUP
+builder.Services
+    .AddCorePersistence(builder.Configuration)  // Uses appsettings.json configuration
+    .AddBulkOperations(options =>               // Configure bulk operations
+    {
+        options.BatchSize = 5000;
+        options.UseTransaction = true;
+        options.LogProgress = true;
+        options.UseParallelProcessing = true;
+    })
+    .AddCompositeTypes()                        // Enable composite types
+    .AddDatabaseHealthCheck("database", "ready", "live"); // Add health checks
+
+// Register composite types
+builder.Services.RegisterCompositeType<Address>("address_type");
+builder.Services.RegisterCompositeType<ContactInfo>("contact_info_type");
+
+// Add application services
+builder.Services.AddScoped<UserService>();
+builder.Services.AddScoped<ProductService>();
+builder.Services.AddScoped<OrderService>();
+
+// Add Swagger/OpenAPI
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+
+// Configure the HTTP request pipeline
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+// Health check endpoints
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    ResponseWriter = async (context, report) =>
+    {
+        context.Response.ContentType = "application/json";
+        var response = new
+        {
+            status = report.Status.ToString(),
+            checks = report.Entries.Select(entry => new
+            {
+                name = entry.Key,
+                status = entry.Value.Status.ToString(),
+                description = entry.Value.Description,
+                duration = entry.Value.Duration.TotalMilliseconds
+            })
+        };
+        await context.Response.WriteAsync(System.Text.Json.JsonSerializer.Serialize(response));
+    }
+});
+
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+});
+
+app.MapHealthChecks("/health/live", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("live")
+});
+
+app.UseHttpsRedirection();
+app.MapControllers();
+
+// Advanced API endpoints
+app.MapGet("/api/users/search", async (string? term, UserService userService) =>
+{
+    var users = await userService.SearchUsersAsync(term);
+    return Results.Ok(users);
+});
+
+app.MapPost("/api/users/bulk", async (IEnumerable<CreateUserRequest> requests, UserService userService) =>
+{
+    var count = await userService.BulkCreateUsersAsync(requests);
+    return Results.Ok(new { ImportedCount = count });
+});
+
+app.MapGet("/api/reports/sales", async (DateTime fromDate, DateTime toDate, OrderService orderService) =>
+{
+    var report = await orderService.GenerateSalesReportAsync(fromDate, toDate);
+    return Results.Ok(report);
+});
+
+app.MapPost("/api/products/import", async (IEnumerable<Product> products, ProductService productService) =>
+{
+    var result = await productService.ImportProductsAsync(products);
+    return Results.Ok(result);
+});
+
+app.Run();
+
+// Advanced Models with PostgreSQL attributes
+public class User
+{
+    public int Id { get; set; }
+    
+    [PgColumn("full_name")]
+    public string Name { get; set; } = string.Empty;
+    
+    public string Email { get; set; } = string.Empty;
+    
+    [PgJson(useJsonb: true)]
+    public UserPreferences Preferences { get; set; } = new();
+    
+    [PgArray]
+    public string[] Roles { get; set; } = Array.Empty<string>();
+    
+    public Address? Address { get; set; }
+    
+    [PgColumn("created_at")]
+    public DateTime CreatedAt { get; set; }
+    
+    [PgColumn("is_active")]
+    public bool IsActive { get; set; }
+}
+
+[PgName("address_type")]
+public class Address
+{
+    [PostgreSqlComposite(1)]
+    public string Street { get; set; } = string.Empty;
+    
+    [PostgreSqlComposite(2)]
+    public string City { get; set; } = string.Empty;
+    
+    [PostgreSqlComposite(3)]
+    public string State { get; set; } = string.Empty;
+    
+    [PostgreSqlComposite(4)]
+    public string ZipCode { get; set; } = string.Empty;
+    
+    [PostgreSqlComposite(5)]
+    public string Country { get; set; } = "USA";
+}
+
+[PgName("contact_info_type")]
+public class ContactInfo
+{
+    [PostgreSqlComposite(1)]
+    public string Phone { get; set; } = string.Empty;
+    
+    [PostgreSqlComposite(2)]
+    public string Email { get; set; } = string.Empty;
+    
+    [PostgreSqlComposite(3)]
+    public string Website { get; set; } = string.Empty;
+}
+
+public class UserPreferences
+{
+    public string Theme { get; set; } = "light";
+    public string Language { get; set; } = "en";
+    public bool NotificationsEnabled { get; set; } = true;
+    public Dictionary<string, object> CustomSettings { get; set; } = new();
+}
+
+public class Product
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public decimal Price { get; set; }
+    
+    [PgArray]
+    public string[] Tags { get; set; } = Array.Empty<string>();
+    
+    [PgJson(useJsonb: true)]
+    public ProductMetadata Metadata { get; set; } = new();
+    
+    public DateTime CreatedAt { get; set; }
+}
+
+public class ProductMetadata
+{
+    public string Brand { get; set; } = string.Empty;
+    public string Color { get; set; } = string.Empty;
+    public Dictionary<string, string> Specifications { get; set; } = new();
+}
+
+public record CreateUserRequest(string Name, string Email, Address? Address = null, string[] Roles = default!);
+
+// Advanced Services
+public class UserService
+{
+    private readonly IPostgreSqlHelper _dbHelper;
+    private readonly PostgreSqlBulkOperations _bulkOps;
+    private readonly IConnectionFactory<IDbConnection> _connectionFactory;
+    private readonly ILogger<UserService> _logger;
+
+    public UserService(IPostgreSqlHelper dbHelper, PostgreSqlBulkOperations bulkOps, IConnectionFactory<IDbConnection> connectionFactory, ILogger<UserService> logger)
+    {
+        _dbHelper = dbHelper;
+        _bulkOps = bulkOps;
+        _connectionFactory = connectionFactory;
+        _logger = logger;
+    }
+
+    public async Task<IEnumerable<User>> SearchUsersAsync(string? searchTerm)
+    {
+        if (string.IsNullOrWhiteSpace(searchTerm))
+        {
+            const string allUsersSql = "SELECT * FROM users WHERE is_active = true ORDER BY created_at DESC LIMIT 50";
+            return await _dbHelper.QueryAsync<User>(allUsersSql);
+        }
+
+        // Full-text search with PostgreSQL
+        const string searchSql = @"
+            SELECT *, ts_rank(search_vector, plainto_tsquery(@SearchTerm)) as rank
+            FROM users 
+            WHERE search_vector @@ plainto_tsquery(@SearchTerm)
+            AND is_active = true
+            ORDER BY rank DESC, created_at DESC
+            LIMIT 50";
+
+        return await _dbHelper.QueryAsync<User>(searchSql, new { SearchTerm = searchTerm });
+    }
+
+    public async Task<long> BulkCreateUsersAsync(IEnumerable<CreateUserRequest> requests)
+    {
+        var users = requests.Select(r => new User
+        {
+            Name = r.Name,
+            Email = r.Email,
+            Address = r.Address,
+            Roles = r.Roles ?? Array.Empty<string>(),
+            CreatedAt = DateTime.UtcNow,
+            IsActive = true
+        });
+
+        using var connection = _connectionFactory.Connection;
+        await connection.OpenAsync();
+        
+        return await _bulkOps.BulkInsertAsync(connection, "users", users);
+    }
+
+    public async Task<User?> GetUserWithFullDetailsAsync(int userId)
+    {
+        // Use PostgreSQL function to get user with calculated fields
+        return await _dbHelper.ExecuteFunctionAsync<User>("get_user_with_details", new { user_id = userId });
+    }
+
+    public async Task<bool> UpdateUserPreferencesAsync(int userId, UserPreferences preferences)
+    {
+        const string sql = @"
+            UPDATE users 
+            SET preferences = @Preferences::jsonb 
+            WHERE id = @UserId";
+
+        var affectedRows = await _dbHelper.ExecuteAsync(sql, new { UserId = userId, Preferences = preferences });
+        return affectedRows > 0;
+    }
+}
+
+public class ProductService
+{
+    private readonly IPostgreSqlHelper _dbHelper;
+    private readonly PostgreSqlBulkOperations _bulkOps;
+    private readonly IConnectionFactory<IDbConnection> _connectionFactory;
+    private readonly ILogger<ProductService> _logger;
+
+    public ProductService(IPostgreSqlHelper dbHelper, PostgreSqlBulkOperations bulkOps, IConnectionFactory<IDbConnection> connectionFactory, ILogger<ProductService> logger)
+    {
+        _dbHelper = dbHelper;
+        _bulkOps = bulkOps;
+        _connectionFactory = connectionFactory;
+        _logger = logger;
+    }
+
+    public async Task<ImportResult> ImportProductsAsync(IEnumerable<Product> products)
+    {
+        var productList = products.ToList();
+        _logger.LogInformation("Starting product import for {Count} products", productList.Count);
+
+        using var connection = _connectionFactory.Connection;
+        await connection.OpenAsync();
+        
+        // Upsert products based on name (assuming it's unique)
+        var importedCount = await _bulkOps.BulkUpsertAsync(
+            connection, 
+            "products", 
+            productList, 
+            new[] { "name" });
+
+        _logger.LogInformation("Product import completed. Processed {Count} products", importedCount);
+
+        return new ImportResult
+        {
+            TotalProcessed = productList.Count,
+            TotalImported = importedCount,
+            Success = true
+        };
+    }
+
+    public async Task<IEnumerable<Product>> FindProductsByTagsAsync(string[] tags)
+    {
+        const string sql = @"
+            SELECT * FROM products 
+            WHERE tags && @Tags  -- Array overlap operator
+            AND is_active = true
+            ORDER BY created_at DESC";
+
+        return await _dbHelper.QueryAsync<Product>(sql, new { Tags = tags });
+    }
+}
+
+public class OrderService
+{
+    private readonly IPostgreSqlHelper _dbHelper;
+
+    public OrderService(IPostgreSqlHelper dbHelper)
+    {
+        _dbHelper = dbHelper;
+    }
+
+    public async Task<SalesReport> GenerateSalesReportAsync(DateTime fromDate, DateTime toDate)
+    {
+        // Use PostgreSQL function for complex reporting
+        var reportData = await _dbHelper.ExecuteFunctionMultipleAsync<SalesReportItem>(
+            "generate_sales_report", 
+            new { from_date = fromDate, to_date = toDate });
+
+        return new SalesReport
+        {
+            FromDate = fromDate,
+            ToDate = toDate,
+            Items = reportData.ToList(),
+            TotalSales = reportData.Sum(x => x.TotalAmount),
+            TotalOrders = reportData.Sum(x => x.OrderCount)
+        };
+    }
+}
+
+public class ImportResult
+{
+    public int TotalProcessed { get; set; }
+    public long TotalImported { get; set; }
+    public bool Success { get; set; }
+    public string? ErrorMessage { get; set; }
+}
+
+public class SalesReport
+{
+    public DateTime FromDate { get; set; }
+    public DateTime ToDate { get; set; }
+    public List<SalesReportItem> Items { get; set; } = new();
+    public decimal TotalSales { get; set; }
+    public int TotalOrders { get; set; }
+}
+
+public class SalesReportItem
+{
+    public string ProductName { get; set; } = string.Empty;
+    public int OrderCount { get; set; }
+    public decimal TotalAmount { get; set; }
+    public decimal AverageOrderValue { get; set; }
+}
+
+/*
+Advanced PostgreSQL Schema:
+
+-- Users table with full-text search
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    full_name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    preferences JSONB DEFAULT '{}',
+    roles TEXT[] DEFAULT '{}',
+    address address_type,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    search_vector tsvector GENERATED ALWAYS AS (
+        to_tsvector('english', full_name || ' ' || email)
+    ) STORED
+);
+
+-- Create composite types
+CREATE TYPE address_type AS (
+    street TEXT,
+    city TEXT,
+    state TEXT,
+    zip_code TEXT,
+    country TEXT
+);
+
+CREATE TYPE contact_info_type AS (
+    phone TEXT,
+    email TEXT,
+    website TEXT
+);
+
+-- Products table with JSONB and arrays
+CREATE TABLE products (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL UNIQUE,
+    description TEXT,
+    price DECIMAL(10,2) NOT NULL,
+    tags TEXT[] DEFAULT '{}',
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    is_active BOOLEAN NOT NULL DEFAULT true
+);
+
+-- Indexes for performance
+CREATE INDEX idx_users_search_vector ON users USING GIN(search_vector);
+CREATE INDEX idx_users_roles ON users USING GIN(roles);
+CREATE INDEX idx_products_tags ON products USING GIN(tags);
+CREATE INDEX idx_products_metadata ON products USING GIN(metadata);
+
+-- PostgreSQL functions
+CREATE OR REPLACE FUNCTION get_user_with_details(user_id INTEGER)
+RETURNS TABLE(
+    id INTEGER,
+    full_name VARCHAR,
+    email VARCHAR,
+    preferences JSONB,
+    roles TEXT[],
+    address address_type,
+    created_at TIMESTAMP,
+    is_active BOOLEAN,
+    order_count BIGINT,
+    total_spent DECIMAL
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        u.id,
+        u.full_name,
+        u.email,
+        u.preferences,
+        u.roles,
+        u.address,
+        u.created_at,
+        u.is_active,
+        COALESCE(COUNT(o.id), 0) as order_count,
+        COALESCE(SUM(o.total_amount), 0) as total_spent
+    FROM users u
+    LEFT JOIN orders o ON u.id = o.user_id
+    WHERE u.id = user_id
+    GROUP BY u.id, u.full_name, u.email, u.preferences, u.roles, u.address, u.created_at, u.is_active;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION generate_sales_report(from_date DATE, to_date DATE)
+RETURNS TABLE(
+    product_name VARCHAR,
+    order_count BIGINT,
+    total_amount DECIMAL,
+    average_order_value DECIMAL
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.name as product_name,
+        COUNT(oi.id) as order_count,
+        SUM(oi.quantity * oi.unit_price) as total_amount,
+        AVG(oi.quantity * oi.unit_price) as average_order_value
+    FROM products p
+    JOIN order_items oi ON p.id = oi.product_id
+    JOIN orders o ON oi.order_id = o.id
+    WHERE o.created_at >= from_date AND o.created_at <= to_date
+    GROUP BY p.id, p.name
+    ORDER BY total_amount DESC;
+END;
+$$ LANGUAGE plpgsql;
+*/

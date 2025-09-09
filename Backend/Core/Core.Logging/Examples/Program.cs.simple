@@ -1,0 +1,83 @@
+using Core.Logging.Extensions;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add controllers
+builder.Services.AddControllers();
+
+// Add Core.Logging - SIMPLE CONSOLE ONLY
+builder.Services.AddCoreLoggingConsole();
+
+var app = builder.Build();
+
+// Configure the HTTP request pipeline
+app.UseHttpsRedirection();
+app.MapControllers();
+
+// Example usage directly in Program.cs
+app.MapGet("/", (IAppLogger logger) =>
+{
+    logger.LogInformation("Hello from Core.Logging!");
+    return "Hello World!";
+});
+
+app.MapGet("/error", (IAppLogger logger) =>
+{
+    try
+    {
+        throw new InvalidOperationException("This is a test error");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "An error occurred in /error endpoint");
+        return "Error occurred - check logs";
+    }
+});
+
+app.Run();
+
+// Example Controller Usage:
+/*
+
+[ApiController]
+[Route("api/[controller]")]
+public class WeatherController : ControllerBase
+{
+    private readonly IAppLogger<WeatherController> _logger;
+
+    public WeatherController(IAppLogger<WeatherController> logger)
+    {
+        _logger = logger;
+    }
+
+    [HttpGet]
+    public IActionResult Get()
+    {
+        _logger.LogInformation("Getting weather data");
+        
+        var weather = new[]
+        {
+            new { Date = DateTime.Now, Temperature = 25, Summary = "Sunny" },
+            new { Date = DateTime.Now.AddDays(1), Temperature = 22, Summary = "Cloudy" }
+        };
+        
+        _logger.LogInformation("Returned {Count} weather records", weather.Length);
+        return Ok(weather);
+    }
+    
+    [HttpPost("error")]
+    public IActionResult SimulateError()
+    {
+        try
+        {
+            throw new Exception("Simulated error for testing");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Simulated error occurred");
+            return StatusCode(500, "Internal server error");
+        }
+    }
+}
+
+*/

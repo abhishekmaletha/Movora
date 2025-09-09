@@ -1,0 +1,118 @@
+using Core.HttpClient.Extensions;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services to the container
+builder.Services.AddControllers();
+
+// Add Core.HttpClient - SIMPLE SETUP
+builder.Services.AddCoreHttpClient("https://jsonplaceholder.typicode.com");
+
+// Add Swagger/OpenAPI
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+
+// Configure the HTTP request pipeline
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+app.MapControllers();
+
+// Example usage directly in Program.cs
+app.MapGet("/", async (HttpClient httpClient) =>
+{
+    var response = await httpClient.GetAsync<dynamic>("/users/1");
+    
+    if (response.IsSuccess)
+    {
+        return Results.Ok(new { Message = "Hello from Core.HttpClient!", User = response.Data });
+    }
+    
+    return Results.Problem($"Failed to fetch user: {response.GetErrorMessage()}");
+});
+
+app.MapGet("/users/{id}", async (int id, HttpClient httpClient) =>
+{
+    var response = await httpClient.GetAsync<dynamic>($"/users/{id}");
+    
+    return response.IsSuccess 
+        ? Results.Ok(response.Data)
+        : Results.Problem(response.GetErrorMessage(), statusCode: response.StatusCodeValue);
+});
+
+app.MapGet("/posts", async (HttpClient httpClient) =>
+{
+    var response = await httpClient.GetAsync<dynamic[]>("/posts");
+    
+    return response.IsSuccess 
+        ? Results.Ok(response.Data)
+        : Results.Problem(response.GetErrorMessage(), statusCode: response.StatusCodeValue);
+});
+
+app.Run();
+
+/*
+Example API Service Class:
+
+public class JsonPlaceholderService
+{
+    private readonly HttpClient _httpClient;
+
+    public JsonPlaceholderService(HttpClient httpClient)
+    {
+        _httpClient = httpClient;
+    }
+
+    public async Task<ApiResponse<User>> GetUserAsync(int id)
+    {
+        return await _httpClient.GetAsync<User>($"/users/{id}");
+    }
+
+    public async Task<ApiResponse<Post[]>> GetPostsAsync()
+    {
+        return await _httpClient.GetAsync<Post[]>("/posts");
+    }
+
+    public async Task<ApiResponse<Post>> CreatePostAsync(CreatePostRequest request)
+    {
+        return await _httpClient.PostAsync<CreatePostRequest, Post>("/posts", request);
+    }
+
+    public async Task<ApiResponse<Post>> UpdatePostAsync(int id, UpdatePostRequest request)
+    {
+        return await _httpClient.PutAsync<UpdatePostRequest, Post>($"/posts/{id}", request);
+    }
+
+    public async Task<ApiResponse<string>> DeletePostAsync(int id)
+    {
+        return await _httpClient.DeleteAsync($"/posts/{id}");
+    }
+}
+
+// Models
+public class User
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Username { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+}
+
+public class Post
+{
+    public int Id { get; set; }
+    public int UserId { get; set; }
+    public string Title { get; set; } = string.Empty;
+    public string Body { get; set; } = string.Empty;
+}
+
+public record CreatePostRequest(int UserId, string Title, string Body);
+public record UpdatePostRequest(string Title, string Body);
+
+*/

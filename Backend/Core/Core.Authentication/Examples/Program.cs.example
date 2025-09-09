@@ -1,0 +1,132 @@
+using Core.Authentication.Extensions;
+using Core.Authentication.Authorization;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services to the container
+builder.Services.AddControllers();
+
+// Add Keycloak Authentication
+builder.Services.AddKeycloakAuthentication(builder.Configuration);
+
+// Add Authorization with custom policies
+builder.Services.AddAuthorization(options =>
+{
+    // Require admin role
+    options.AddPolicy("AdminOnly", KeycloakAuthorizationPolicyBuilder.RequireRealmRoles("admin"));
+    
+    // Require either admin or manager role
+    options.AddPolicy("AdminOrManager", KeycloakAuthorizationPolicyBuilder.RequireRealmRoles("admin", "manager"));
+    
+    // Require specific resource role
+    options.AddPolicy("ApiReadAccess", KeycloakAuthorizationPolicyBuilder.RequireResourceRoles("my-api", "read"));
+    
+    // Custom policy
+    options.AddPolicy("EmailVerified", KeycloakAuthorizationPolicyBuilder.RequireClaim("email_verified", "true"));
+});
+
+// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    // Configure Swagger for JWT Bearer authentication
+    c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    {
+        Description = "JWT Authorization header using the Bearer scheme. Example: \"Authorization: Bearer {token}\"",
+        Name = "Authorization",
+        In = Microsoft.OpenApi.Models.ParameterLocation.Header,
+        Type = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey,
+        Scheme = "Bearer"
+    });
+
+    c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
+    {
+        {
+            new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+            {
+                Reference = new Microsoft.OpenApi.Models.OpenApiReference
+                {
+                    Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
+
+var app = builder.Build();
+
+// Configure the HTTP request pipeline
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+
+// IMPORTANT: Authentication must come before Authorization
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapControllers();
+
+app.Run();
+
+// Example Controller Usage:
+/*
+
+[ApiController]
+[Route("api/[controller]")]
+[Authorize] // Requires authentication
+public class WeatherForecastController : ControllerBase
+{
+    private readonly IKeycloakUserService _userService;
+
+    public WeatherForecastController(IKeycloakUserService userService)
+    {
+        _userService = userService;
+    }
+
+    [HttpGet]
+    public IActionResult Get()
+    {
+        var username = _userService.GetUsername(User);
+        var roles = _userService.GetRoles(User);
+        
+        return Ok(new
+        {
+            Message = $"Hello {username}!",
+            Roles = roles,
+            Data = GetWeatherData()
+        });
+    }
+
+    [HttpGet("admin")]
+    [Authorize(Policy = "AdminOnly")]
+    public IActionResult GetAdminData()
+    {
+        return Ok("This is admin-only data");
+    }
+
+    [HttpGet("manager")]
+    [Authorize(Policy = "AdminOrManager")]
+    public IActionResult GetManagerData()
+    {
+        return Ok("This requires admin or manager role");
+    }
+
+    private static IEnumerable<object> GetWeatherData()
+    {
+        var summaries = new[] { "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching" };
+        return Enumerable.Range(1, 5).Select(index => new
+        {
+            Date = DateTime.Now.AddDays(index),
+            TemperatureC = Random.Shared.Next(-20, 55),
+            Summary = summaries[Random.Shared.Next(summaries.Length)]
+        });
+    }
+}
+
+*/

@@ -1,0 +1,201 @@
+using Core.Persistence.Extensions;
+using Core.Persistence.Helpers;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services to the container
+builder.Services.AddControllers();
+
+// Add Core.Persistence - SIMPLE SETUP
+builder.Services.AddCorePersistencePostgreSQL(
+    "Host=localhost;Database=myapp;Username=user;Password=password");
+
+// Add Swagger/OpenAPI
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+
+// Configure the HTTP request pipeline
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+app.MapControllers();
+
+// Example usage directly in Program.cs
+app.MapGet("/users", async (IPostgreSqlHelper dbHelper) =>
+{
+    const string sql = "SELECT id, name, email FROM users WHERE is_active = true";
+    var users = await dbHelper.QueryAsync<dynamic>(sql);
+    return Results.Ok(users);
+});
+
+app.MapGet("/users/{id}", async (int id, IPostgreSqlHelper dbHelper) =>
+{
+    const string sql = "SELECT id, name, email FROM users WHERE id = @Id";
+    var user = await dbHelper.QuerySingleOrDefaultAsync<dynamic>(sql, new { Id = id });
+    
+    return user != null ? Results.Ok(user) : Results.NotFound();
+});
+
+app.MapPost("/users", async (CreateUserRequest request, IPostgreSqlHelper dbHelper) =>
+{
+    const string sql = @"
+        INSERT INTO users (name, email, created_at) 
+        VALUES (@Name, @Email, @CreatedAt) 
+        RETURNING id";
+    
+    var userId = await dbHelper.ExecuteScalarAsync<int>(sql, new 
+    { 
+        request.Name, 
+        request.Email, 
+        CreatedAt = DateTime.UtcNow 
+    });
+    
+    return Results.Created($"/users/{userId}", new { Id = userId });
+});
+
+app.Run();
+
+// Example models
+public record CreateUserRequest(string Name, string Email);
+
+public class User
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+    public bool IsActive { get; set; }
+}
+
+/*
+Example SQL Schema:
+
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    is_active BOOLEAN NOT NULL DEFAULT true
+);
+
+Example Service Class:
+
+public class UserService
+{
+    private readonly IPostgreSqlHelper _dbHelper;
+
+    public UserService(IPostgreSqlHelper dbHelper)
+    {
+        _dbHelper = dbHelper;
+    }
+
+    public async Task<User?> GetUserAsync(int userId)
+    {
+        const string sql = "SELECT * FROM users WHERE id = @UserId";
+        return await _dbHelper.QuerySingleOrDefaultAsync<User>(sql, new { UserId = userId });
+    }
+
+    public async Task<IEnumerable<User>> GetActiveUsersAsync()
+    {
+        const string sql = "SELECT * FROM users WHERE is_active = true ORDER BY created_at DESC";
+        return await _dbHelper.QueryAsync<User>(sql);
+    }
+
+    public async Task<int> CreateUserAsync(string name, string email)
+    {
+        const string sql = @"
+            INSERT INTO users (name, email, created_at) 
+            VALUES (@Name, @Email, @CreatedAt) 
+            RETURNING id";
+        
+        return await _dbHelper.ExecuteScalarAsync<int>(sql, new 
+        { 
+            Name = name, 
+            Email = email, 
+            CreatedAt = DateTime.UtcNow 
+        });
+    }
+
+    public async Task<bool> UpdateUserAsync(int userId, string name, string email)
+    {
+        const string sql = @"
+            UPDATE users 
+            SET name = @Name, email = @Email 
+            WHERE id = @UserId";
+        
+        var affectedRows = await _dbHelper.ExecuteAsync(sql, new 
+        { 
+            UserId = userId, 
+            Name = name, 
+            Email = email 
+        });
+        
+        return affectedRows > 0;
+    }
+
+    public async Task<bool> DeleteUserAsync(int userId)
+    {
+        const string sql = "DELETE FROM users WHERE id = @UserId";
+        var affectedRows = await _dbHelper.ExecuteAsync(sql, new { UserId = userId });
+        return affectedRows > 0;
+    }
+}
+
+Controller Example:
+
+[ApiController]
+[Route("api/[controller]")]
+public class UsersController : ControllerBase
+{
+    private readonly UserService _userService;
+
+    public UsersController(UserService userService)
+    {
+        _userService = userService;
+    }
+
+    [HttpGet]
+    public async Task<ActionResult<IEnumerable<User>>> GetUsers()
+    {
+        var users = await _userService.GetActiveUsersAsync();
+        return Ok(users);
+    }
+
+    [HttpGet("{id}")]
+    public async Task<ActionResult<User>> GetUser(int id)
+    {
+        var user = await _userService.GetUserAsync(id);
+        return user != null ? Ok(user) : NotFound();
+    }
+
+    [HttpPost]
+    public async Task<ActionResult> CreateUser([FromBody] CreateUserRequest request)
+    {
+        var userId = await _userService.CreateUserAsync(request.Name, request.Email);
+        return CreatedAtAction(nameof(GetUser), new { id = userId }, new { Id = userId });
+    }
+
+    [HttpPut("{id}")]
+    public async Task<ActionResult> UpdateUser(int id, [FromBody] CreateUserRequest request)
+    {
+        var success = await _userService.UpdateUserAsync(id, request.Name, request.Email);
+        return success ? NoContent() : NotFound();
+    }
+
+    [HttpDelete("{id}")]
+    public async Task<ActionResult> DeleteUser(int id)
+    {
+        var success = await _userService.DeleteUserAsync(id);
+        return success ? NoContent() : NotFound();
+    }
+}
+
+// Register the service
+builder.Services.AddScoped<UserService>();
+*/

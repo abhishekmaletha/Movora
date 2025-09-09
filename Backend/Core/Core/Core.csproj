@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <PackageId>Core</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Movora</Authors>
+    <Description>Core repository patterns and data store abstractions for the Movora application</Description>
+  </PropertyGroup>
+
+</Project>
