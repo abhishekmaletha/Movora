@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Movora.Domain.FlexiSearch;
@@ -30,17 +31,19 @@ internal sealed class OpenAiLlmSearch : ILlmSearch
           "yearTo": number|null,
           "runtimeMaxMinutes": number|null,
           "mediaTypes": string[], // allowed: "movie","tv"
-          "requestedCount": number|null
+          "requestedCount": number|null,
+          "isRequestingSuggestions": boolean
         }
         Rules:
         * Infer moods (e.g., feel-good, dark, mind-bending, cozy, gritty).
         * If user says "under 2h" set "runtimeMaxMinutes": 120.
         * If query contains a single exact title, include it in "titles".
         * Extract people (actors/directors) if present.
-        * If media type not specified, include both "movie" and "tv".
+        * Media type detection: If the user explicitly says 'movies' or 'films', set mediaTypes to only "movie". If they explicitly say 'TV shows' or 'series', set it to only "tv". If not specified, include both "movie" and "tv".
         * If a single year given, set both yearFrom/yearTo to that year.
         * Extract number from phrases like "top 5", "best 10", "give me 3" and set "requestedCount".
         * If no specific count requested, set "requestedCount": null.
+        * Set "isRequestingSuggestions": true if the user asks for suggestions, recommendations, similar content, or uses phrases like "like", "similar to", "recommend", "suggest", "what should I watch", "movies like". Set to false for direct title searches.
         * Keep arrays unique and lower-case for genres/moods/mediaTypes, preserve case for titles/people.
         """;
 
@@ -92,7 +95,7 @@ internal sealed class OpenAiLlmSearch : ILlmSearch
                 return CreateFallbackIntent(query);
             }
 
-            var intentJson = chatResponse.Choices.First().Message.Content.Trim();
+            var intentJson = chatResponse.Choices!.First().Message!.Content!.Trim();
             return ParseLlmIntent(intentJson, query);
         }
         catch (Exception ex)
@@ -131,7 +134,8 @@ internal sealed class OpenAiLlmSearch : ILlmSearch
                 YearTo = intentData.YearTo,
                 RuntimeMaxMinutes = intentData.RuntimeMaxMinutes,
                 MediaTypes = (intentData.MediaTypes ?? new[] { "movie", "tv" }).ToList(),
-                RequestedCount = intentData.RequestedCount
+                RequestedCount = intentData.RequestedCount,
+                IsRequestingSuggestions = intentData.IsRequestingSuggestions ?? false
             };
         }
         catch (JsonException ex)
@@ -174,7 +178,8 @@ internal sealed class OpenAiLlmSearch : ILlmSearch
             YearTo = null,
             RuntimeMaxMinutes = null,
             MediaTypes = new List<string> { "movie", "tv" },
-            RequestedCount = requestedCount
+            RequestedCount = requestedCount,
+            IsRequestingSuggestions = false // Default to exact search in fallback
         };
     }
 
@@ -205,15 +210,31 @@ internal sealed class OpenAiLlmSearch : ILlmSearch
     }
 
     private sealed record OpenAiChatResponse(
-        OpenAiChoice[]? Choices
+        [property: JsonPropertyName("id")] string? Id,
+        [property: JsonPropertyName("object")] string? Object,
+        [property: JsonPropertyName("created")] long Created,
+        [property: JsonPropertyName("model")] string? Model,
+        [property: JsonPropertyName("choices")] OpenAiChoice[]? Choices,
+        [property: JsonPropertyName("usage")] OpenAiUsage? Usage,
+        [property: JsonPropertyName("system_fingerprint")] string? SystemFingerprint
     );
 
     private sealed record OpenAiChoice(
-        OpenAiMessage? Message
+        [property: JsonPropertyName("index")] int Index,
+        [property: JsonPropertyName("message")] OpenAiMessage? Message,
+        [property: JsonPropertyName("logprobs")] object? Logprobs,
+        [property: JsonPropertyName("finish_reason")] string? FinishReason
     );
 
     private sealed record OpenAiMessage(
-        string? Content
+        [property: JsonPropertyName("role")] string? Role,
+        [property: JsonPropertyName("content")] string? Content
+    );
+
+    private sealed record OpenAiUsage(
+        [property: JsonPropertyName("prompt_tokens")] int PromptTokens,
+        [property: JsonPropertyName("completion_tokens")] int CompletionTokens,
+        [property: JsonPropertyName("total_tokens")] int TotalTokens
     );
 
     private sealed record LlmIntentDto(
@@ -225,6 +246,7 @@ internal sealed class OpenAiLlmSearch : ILlmSearch
         int? YearTo,
         int? RuntimeMaxMinutes,
         string[]? MediaTypes,
-        int? RequestedCount
+        int? RequestedCount,
+        bool? IsRequestingSuggestions
     );
 }

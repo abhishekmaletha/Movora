@@ -45,7 +45,8 @@ internal sealed class Ranker : IRanker
             .Take(50) // Limit to top 50 results
             .Select(item => new RankedItem(
                 item.Hit,
-                Math.Min(1.0, item.Score), // Cap score at 1.0
+                // Cap score at 1.0 unless it's an exact match
+                IsExactMatch(item.Hit) ? Math.Min(2.5, item.Score) : Math.Min(1.0, item.Score),
                 GenerateReasoning(item.Reasons)
             ))
             .ToList();
@@ -59,7 +60,7 @@ internal sealed class Ranker : IRanker
     /// Calculates relevance score for a search hit based on extracted intent
     /// 
     /// Scoring Formula:
-    /// - Base score by source: direct title (1.0), recs/similar (0.85), discover (0.75)
+    /// - Base score by source: exact match (2.0), direct title (1.0), person (0.95), recs/similar (0.85), discover (0.75)
     /// - Genre/mood match boost: +0.05 each
     /// - Year proximity boost: +0.0 to +0.1 based on closeness
     /// - Runtime constraint match: +0.05
@@ -96,6 +97,7 @@ internal sealed class Ranker : IRanker
 
         return source switch
         {
+            "exact_match" => AddReason(reasons, "Exact title match", 2.0),
             "direct_title" => AddReason(reasons, "Direct title match", 1.0),
             "direct_person" => AddReason(reasons, "Person match", 0.95),
             "recommendations" => AddReason(reasons, "Recommended content", 0.85),
@@ -317,5 +319,12 @@ internal sealed class Ranker : IRanker
     {
         reasons.Add(reason);
         return score;
+    }
+
+    private static bool IsExactMatch(SearchHit hit)
+    {
+        return hit.Signals.TryGetValue("source", out var sourceObj) && 
+               sourceObj is string source && 
+               source == "exact_match";
     }
 }

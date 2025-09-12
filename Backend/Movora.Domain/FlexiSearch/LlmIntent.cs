@@ -50,4 +50,10 @@ public sealed record LlmIntent
     /// If null, return all relevant results
     /// </summary>
     public int? RequestedCount { get; init; }
+
+    /// <summary>
+    /// Whether the user is asking for suggestions, recommendations, or similar content
+    /// If false, prioritize exact matches only
+    /// </summary>
+    public bool IsRequestingSuggestions { get; init; }
 }
