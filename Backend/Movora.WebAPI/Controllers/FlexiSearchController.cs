@@ -127,6 +127,149 @@ public sealed class FlexiSearchController : ControllerBase
     }
 
     /// <summary>
+    /// Enhanced flexible search using the new FlexiSearch brain with sophisticated ranking
+    /// </summary>
+    /// <param name="request">Search request containing natural language query</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>Search results with enhanced hybrid ranking and detailed reasoning</returns>
+    /// <response code="200">Search completed successfully</response>
+    /// <response code="400">Invalid request or empty query</response>
+    /// <response code="500">Internal server error during search</response>
+    [HttpPost("enhanced")]
+    [ProducesResponseType<FlexiSearchResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status500InternalServerError)]
+    public async Task<ActionResult<FlexiSearchResponse>> EnhancedSearchAsync(
+        [FromBody] FlexiSearchRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request == null)
+        {
+            _logger.LogWarning("Enhanced FlexiSearch called with null request");
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Invalid Request",
+                Detail = "Request body cannot be null",
+                Status = StatusCodes.Status400BadRequest,
+                Instance = HttpContext.Request.Path
+            });
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Query))
+        {
+            _logger.LogWarning("Enhanced FlexiSearch called with empty query");
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Invalid Query",
+                Detail = "Query cannot be empty or whitespace",
+                Status = StatusCodes.Status400BadRequest,
+                Instance = HttpContext.Request.Path
+            });
+        }
+
+        try
+        {
+            _logger.LogInformation("Processing Enhanced FlexiSearch request for query: {Query}", request.Query);
+
+            // Use the enhanced handler directly
+            //var enhancedHandler = HttpContext.RequestServices.GetRequiredService<EnhancedFlexiSearchCommandHandler>();
+            var command = new EnhancedFlexiSearchCommand(request);
+            var response = await _mediator.Send(command);
+
+            // Add trace ID for request tracking
+            response = response with { TraceId = HttpContext.TraceIdentifier };
+
+            _logger.LogInformation("Enhanced FlexiSearch completed successfully with {ResultCount} results for trace: {TraceId}",
+                response.Results.Count, response.TraceId);
+
+            return Ok(response);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error in Enhanced FlexiSearch for query: {Query}", request.Query);
+            return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
+            {
+                Title = "Internal Server Error",
+                Detail = "An unexpected error occurred while processing the enhanced search request",
+                Status = StatusCodes.Status500InternalServerError,
+                Instance = HttpContext.Request.Path
+            });
+        }
+    }
+
+    /// <summary>
+    /// Minimal flexible search with deterministic, predictable behavior
+    /// Uses 4 simple modes: TITLE, SIMILAR, GENRE, FALLBACK
+    /// </summary>
+    /// <param name="request">Search request containing natural language query</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>Search results with simple, predictable ranking</returns>
+    /// <response code="200">Search completed successfully</response>
+    /// <response code="400">Invalid request or empty query</response>
+    /// <response code="500">Internal server error during search</response>
+    [HttpPost("minimal")]
+    [ProducesResponseType<FlexiSearchResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status500InternalServerError)]
+    public async Task<ActionResult<FlexiSearchResponse>> MinimalSearchAsync(
+        [FromBody] FlexiSearchRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request == null)
+        {
+            _logger.LogWarning("Minimal FlexiSearch called with null request");
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Invalid Request",
+                Detail = "Request body cannot be null",
+                Status = StatusCodes.Status400BadRequest,
+                Instance = HttpContext.Request.Path
+            });
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Query))
+        {
+            _logger.LogWarning("Minimal FlexiSearch called with empty query");
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Invalid Query",
+                Detail = "Query cannot be empty or whitespace",
+                Status = StatusCodes.Status400BadRequest,
+                Instance = HttpContext.Request.Path
+            });
+        }
+
+        try
+        {
+            _logger.LogInformation("Processing Minimal FlexiSearch request for query: {Query}", request.Query);
+
+            // Use the minimal handler directly
+            //var minimalHandler = HttpContext.RequestServices.GetRequiredService<MinimalFlexiSearchCommandHandler>();
+            var command = new MinimalFlexiSearchCommand(request);
+            var response = await this._mediator.Send(command);
+
+            // Add trace ID for request tracking
+            response = response with { TraceId = HttpContext.TraceIdentifier };
+
+            _logger.LogInformation("Minimal FlexiSearch completed successfully with {ResultCount} results for trace: {TraceId}",
+                response.Results.Count, response.TraceId);
+
+            return Ok(response);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error in Minimal FlexiSearch for query: {Query}", request.Query);
+            return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
+            {
+                Title = "Internal Server Error",
+                Detail = "An unexpected error occurred while processing the minimal search request",
+                Status = StatusCodes.Status500InternalServerError,
+                Instance = HttpContext.Request.Path
+            });
+        }
+    }
+
+    /// <summary>
     /// Health check endpoint for FlexiSearch functionality
     /// </summary>
     /// <returns>Health status</returns>
@@ -138,7 +281,8 @@ public sealed class FlexiSearchController : ControllerBase
         {
             status = "healthy",
             timestamp = DateTimeOffset.UtcNow,
-            version = "1.0.0"
+            version = "3.0.0",
+            features = new[] { "basic_search", "enhanced_search", "minimal_search", "deterministic_ranking" }
         });
     }
 }

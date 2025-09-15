@@ -23,9 +23,14 @@ public static class ServiceCollectionExtensions
             throw new ArgumentNullException(nameof(configuration));
 
         // Register core FlexiSearch services
-        services.AddScoped<IRanker, Ranker>();
+        services.AddScoped<IRanker, EnhancedRanker>();
         services.AddScoped<ILlmSearch, LlmSearchSelector>();
-
+        
+        // Register handlers
+        //services.AddScoped<FlexiSearchCommandHandler>();
+        //services.AddScoped<EnhancedFlexiSearchCommandHandler>();
+        //services.AddScoped<MinimalFlexiSearchCommandHandler>();
+        
         // Register individual LLM provider implementations
         services.AddScoped<OpenAiLlmSearch>();
         services.AddScoped<GroqLlmSearch>();

@@ -252,9 +252,29 @@ internal sealed class TmdbClient : ITmdbClient
     {
         var endpoint = $"discover/{query.MediaType}?api_key={_apiKey}";
         
-        if (query.GenreIds.Any())
+        if (query.GenreIds?.Any() == true)
         {
             endpoint += $"&with_genres={string.Join(",", query.GenreIds)}";
+        }
+
+        if (query.KeywordIds?.Any() == true)
+        {
+            endpoint += $"&with_keywords={string.Join(",", query.KeywordIds)}";
+        }
+
+        if (query.WithCast?.Any() == true)
+        {
+            endpoint += $"&with_cast={string.Join(",", query.WithCast)}";
+        }
+
+        if (query.WithCrew?.Any() == true)
+        {
+            endpoint += $"&with_crew={string.Join(",", query.WithCrew)}";
+        }
+
+        if (query.WithPeople?.Any() == true)
+        {
+            endpoint += $"&with_people={string.Join(",", query.WithPeople)}";
         }
         
         if (query.YearFrom.HasValue)
@@ -273,6 +293,21 @@ internal sealed class TmdbClient : ITmdbClient
         {
             endpoint += $"&with_runtime.lte={query.RuntimeLteMinutes.Value}";
         }
+
+        if (query.RuntimeGteMinutes.HasValue && query.MediaType == "movie")
+        {
+            endpoint += $"&with_runtime.gte={query.RuntimeGteMinutes.Value}";
+        }
+
+        if (!string.IsNullOrEmpty(query.WithOriginalLanguage))
+        {
+            endpoint += $"&with_original_language={query.WithOriginalLanguage}";
+        }
+
+        if (query.VoteCountGte.HasValue)
+        {
+            endpoint += $"&vote_count.gte={query.VoteCountGte.Value}";
+        }
         
         if (!string.IsNullOrEmpty(query.SortBy))
         {
@@ -290,6 +325,170 @@ internal sealed class TmdbClient : ITmdbClient
         return int.TryParse(dateString[..4], out var year) ? year : null;
     }
 
+    public async Task<TmdbPersonResult> SearchPersonAsync(string query, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+            throw new ArgumentException("Query cannot be null or empty", nameof(query));
+
+        var endpoint = $"search/person?api_key={_apiKey}&query={Uri.EscapeDataString(query)}";
+        
+        try
+        {
+            var response = await ExecuteWithRateLimitAsync<TmdbPersonApiResponse>(endpoint, ct);
+            
+            return new TmdbPersonResult(
+                response.Results?.Select(r => new TmdbPersonItem(
+                    r.Id,
+                    r.Name ?? "Unknown",
+                    r.ProfilePath,
+                    r.KnownFor?.Select(kf => new TmdbPersonKnownFor(
+                        kf.Id,
+                        kf.MediaType ?? "unknown",
+                        kf.Name,
+                        kf.Title,
+                        kf.Overview,
+                        kf.VoteAverage,
+                        kf.ReleaseDate,
+                        kf.FirstAirDate,
+                        kf.PosterPath
+                    )).ToList() ?? new List<TmdbPersonKnownFor>()
+                )).ToList() ?? new List<TmdbPersonItem>()
+            );
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error searching TMDb person for query: {Query}", query);
+            return new TmdbPersonResult(new List<TmdbPersonItem>());
+        }
+    }
+
+    public async Task<TmdbMovieResult> SearchMovieAsync(string query, int? year = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+            throw new ArgumentException("Query cannot be null or empty", nameof(query));
+
+        var endpoint = $"search/movie?api_key={_apiKey}&query={Uri.EscapeDataString(query)}";
+        if (year.HasValue)
+        {
+            endpoint += $"&year={year.Value}";
+        }
+        
+        try
+        {
+            var response = await ExecuteWithRateLimitAsync<TmdbMovieApiResponse>(endpoint, ct);
+            
+            return new TmdbMovieResult(
+                response.Results?.Select(r => new TmdbMovieItem(
+                    r.Id,
+                    r.Title ?? "Unknown",
+                    r.Overview,
+                    r.VoteAverage,
+                    r.ReleaseDate,
+                    r.PosterPath,
+                    r.GenreIds?.ToList() ?? new List<int>()
+                )).ToList() ?? new List<TmdbMovieItem>()
+            );
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error searching TMDb movie for query: {Query}", query);
+            return new TmdbMovieResult(new List<TmdbMovieItem>());
+        }
+    }
+
+    public async Task<TmdbTvResult> SearchTvAsync(string query, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+            throw new ArgumentException("Query cannot be null or empty", nameof(query));
+
+        var endpoint = $"search/tv?api_key={_apiKey}&query={Uri.EscapeDataString(query)}";
+        
+        try
+        {
+            var response = await ExecuteWithRateLimitAsync<TmdbTvApiResponse>(endpoint, ct);
+            
+            return new TmdbTvResult(
+                response.Results?.Select(r => new TmdbTvItem(
+                    r.Id,
+                    r.Name ?? "Unknown",
+                    r.Overview,
+                    r.VoteAverage,
+                    r.FirstAirDate,
+                    r.PosterPath,
+                    r.GenreIds?.ToList() ?? new List<int>()
+                )).ToList() ?? new List<TmdbTvItem>()
+            );
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error searching TMDb TV for query: {Query}", query);
+            return new TmdbTvResult(new List<TmdbTvItem>());
+        }
+    }
+
+    public async Task<TmdbMovieDetails?> GetMovieDetailsAsync(int movieId, CancellationToken ct = default)
+    {
+        var endpoint = $"movie/{movieId}?api_key={_apiKey}";
+        
+        try
+        {
+            var response = await ExecuteWithRateLimitAsync<TmdbMovieDetailsApiResponse>(endpoint, ct);
+            
+            if (response == null)
+                return null;
+
+            return new TmdbMovieDetails(
+                response.Id,
+                response.Title ?? "Unknown",
+                response.Overview,
+                response.VoteAverage,
+                response.ReleaseDate,
+                response.PosterPath,
+                response.Genres?.Select(g => new TmdbGenre(g.Id, g.Name ?? "Unknown")).ToList() ?? new List<TmdbGenre>(),
+                response.Runtime,
+                response.Status,
+                response.Tagline
+            );
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting movie details for ID: {MovieId}", movieId);
+            return null;
+        }
+    }
+
+    public async Task<TmdbTvDetails?> GetTvDetailsAsync(int tvId, CancellationToken ct = default)
+    {
+        var endpoint = $"tv/{tvId}?api_key={_apiKey}";
+        
+        try
+        {
+            var response = await ExecuteWithRateLimitAsync<TmdbTvDetailsApiResponse>(endpoint, ct);
+            
+            if (response == null)
+                return null;
+
+            return new TmdbTvDetails(
+                response.Id,
+                response.Name ?? "Unknown",
+                response.Overview,
+                response.VoteAverage,
+                response.FirstAirDate,
+                response.PosterPath,
+                response.Genres?.Select(g => new TmdbGenre(g.Id, g.Name ?? "Unknown")).ToList() ?? new List<TmdbGenre>(),
+                response.Status,
+                response.Type,
+                response.NumberOfSeasons,
+                response.NumberOfEpisodes
+            );
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting TV details for ID: {TvId}", tvId);
+            return null;
+        }
+    }
+
     // TMDb API response DTOs
     private sealed record TmdbMultiSearchApiResponse(TmdbMultiSearchItem[]? Results);
     private sealed record TmdbMultiSearchItem(int Id, string? MediaType, string? Name, string? Title, string? Overview, double? VoteAverage, string? ReleaseDate, string? FirstAirDate, string? PosterPath);
@@ -305,4 +504,41 @@ internal sealed class TmdbClient : ITmdbClient
     
     private sealed record TmdbGenreApiResponse(TmdbGenreApiItem[]? Genres);
     private sealed record TmdbGenreApiItem(int Id, string Name);
+
+    private sealed record TmdbPersonApiResponse(TmdbPersonApiItem[]? Results);
+    private sealed record TmdbPersonApiItem(int Id, string? Name, string? ProfilePath, TmdbPersonKnownForApiItem[]? KnownFor);
+    private sealed record TmdbPersonKnownForApiItem(int Id, string? MediaType, string? Name, string? Title, string? Overview, double? VoteAverage, string? ReleaseDate, string? FirstAirDate, string? PosterPath);
+
+    private sealed record TmdbMovieApiResponse(TmdbMovieApiItem[]? Results);
+    private sealed record TmdbMovieApiItem(int Id, string? Title, string? Overview, double? VoteAverage, string? ReleaseDate, string? PosterPath, int[]? GenreIds);
+
+    private sealed record TmdbTvApiResponse(TmdbTvApiItem[]? Results);
+    private sealed record TmdbTvApiItem(int Id, string? Name, string? Overview, double? VoteAverage, string? FirstAirDate, string? PosterPath, int[]? GenreIds);
+
+    private sealed record TmdbMovieDetailsApiResponse(
+        int Id, 
+        string? Title, 
+        string? Overview, 
+        double? VoteAverage, 
+        string? ReleaseDate, 
+        string? PosterPath,
+        TmdbGenreApiItem[]? Genres,
+        int? Runtime,
+        string? Status,
+        string? Tagline
+    );
+
+    private sealed record TmdbTvDetailsApiResponse(
+        int Id,
+        string? Name,
+        string? Overview,
+        double? VoteAverage,
+        string? FirstAirDate,
+        string? PosterPath,
+        TmdbGenreApiItem[]? Genres,
+        string? Status,
+        string? Type,
+        int? NumberOfSeasons,
+        int? NumberOfEpisodes
+    );
 }

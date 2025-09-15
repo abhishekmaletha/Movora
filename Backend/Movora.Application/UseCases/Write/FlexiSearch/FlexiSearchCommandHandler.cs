@@ -46,38 +46,45 @@ public sealed class FlexiSearchCommandHandler : IRequestHandler<FlexiSearchComma
             var intent = await _llm.ExtractIntentAsync(query, cancellationToken);
             _logger.LogDebug("Extracted intent: {@Intent}", intent);
 
-            // Step 2: Execute targeted sequential search strategy
-            var searchHits = new List<SearchHit>();
+            // Step 2: Create requested genres list
+            var requestedGenres = new List<int>();
 
+            // Step 3: If titles are provided, search them and extract their genres
             if (intent.Titles.Any())
             {
-                // Strategy A: User provided specific titles
-                searchHits = await ExecuteTargetedTitleSearchAsync(intent, cancellationToken);
+                var genresFromTitles = await ExtractGenresFromTitlesAsync(intent.Titles, intent.MediaTypes, cancellationToken);
+                requestedGenres.AddRange(genresFromTitles);
+                _logger.LogInformation("Extracted {Count} genres from provided titles", genresFromTitles.Count);
             }
-            else if (intent.Genres.Any() || intent.Moods.Any() || intent.People.Any())
+
+            // Step 4: If requestedGenres is empty, extract from user's genres/moods
+            if (!requestedGenres.Any())
             {
-                // Strategy B: User provided genres/moods/people but no specific titles
-                searchHits = await ExecuteGenreMoodSearchAsync(intent, cancellationToken);
+                var genresFromIntent = await ExtractGenresFromIntentAsync(intent, cancellationToken);
+                requestedGenres.AddRange(genresFromIntent);
+                _logger.LogInformation("Extracted {Count} genres from user intent", genresFromIntent.Count);
             }
-            else
+
+            // Step 5: If still no genres, return empty results
+            if (!requestedGenres.Any())
             {
-                // Strategy C: Fallback for vague queries
-                _logger.LogWarning("No specific titles, genres, moods, or people found in query");
+                _logger.LogWarning("No genres could be determined from query");
                 return new FlexiSearchResponse { Results = Array.Empty<MovieSearchDetails>() };
             }
 
-            // Step 3: Rank and merge results
-            var rankedItems = _ranker.RankAndMerge(searchHits, intent);
+            // Step 6: Find top 100 movies matching requested genres
+            var searchHits = await FindTop100MoviesForGenresAsync(requestedGenres, intent.MediaTypes, cancellationToken);
+            
+            // Step 7: Rank and sort based on description match, rating, and year
+            var rankedItems = RankByDescriptionRatingYear(searchHits, intent);
 
-            // Step 4: Apply requested count limit if specified
+            // Step 8: Apply requested count limit if specified
             var limitedResults = intent.RequestedCount.HasValue 
                 ? rankedItems.Take(intent.RequestedCount.Value) 
                 : rankedItems;
 
-            // Step 5: Apply media type filtering and convert to response format
-            var mediaTypeFilteredResults = ApplyMediaTypeFilter(limitedResults, intent.MediaTypes);
-            
-            var results = mediaTypeFilteredResults.Select(item => new MovieSearchDetails
+            // Step 9: Convert to response format
+            var results = limitedResults.Select(item => new MovieSearchDetails
             {
                 TmdbId = item.Hit.TmdbId,
                 Name = item.Hit.Name,
@@ -90,18 +97,7 @@ public sealed class FlexiSearchCommandHandler : IRequestHandler<FlexiSearchComma
                 Reasoning = item.Reasoning
             }).ToList();
 
-            var totalFound = rankedItems.Count;
-            var returnedCount = results.Count;
-            
-            if (intent.RequestedCount.HasValue && totalFound > returnedCount)
-            {
-                _logger.LogInformation("FlexiSearch found {TotalFound} results, returning top {ReturnedCount} as requested", 
-                    totalFound, returnedCount);
-            }
-            else
-            {
-                _logger.LogInformation("FlexiSearch completed with {ResultCount} results", results.Count);
-            }
+            _logger.LogInformation("FlexiSearch completed with {ResultCount} results", results.Count);
 
             return new FlexiSearchResponse
             {
@@ -115,120 +111,6 @@ public sealed class FlexiSearchCommandHandler : IRequestHandler<FlexiSearchComma
             // Return empty results rather than throwing to provide graceful degradation
             return new FlexiSearchResponse { Results = Array.Empty<MovieSearchDetails>() };
         }
-    }
-
-    private async Task<IEnumerable<SearchHit>> ExecuteDirectSearchAsync(LlmIntent intent, CancellationToken cancellationToken)
-    {
-        var hits = new List<SearchHit>();
-
-        // Search for titles
-        foreach (var title in intent.Titles)
-        {
-            try
-            {
-                var result = await _tmdb.SearchMultiAsync(title, cancellationToken);
-                hits.AddRange(ConvertMultiResultToHits(result, "direct_title"));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error searching for title: {Title}", title);
-            }
-        }
-
-        // Search for people
-        foreach (var person in intent.People)
-        {
-            try
-            {
-                var result = await _tmdb.SearchMultiAsync(person, cancellationToken);
-                hits.AddRange(ConvertMultiResultToHits(result, "direct_person"));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error searching for person: {Person}", person);
-            }
-        }
-
-        return hits;
-    }
-
-    private async Task<IEnumerable<SearchHit>> ExecuteDiscoverySearchAsync(LlmIntent intent, CancellationToken cancellationToken)
-    {
-        var hits = new List<SearchHit>();
-
-        foreach (var mediaType in intent.MediaTypes.Any() ? intent.MediaTypes : new[] { "movie", "tv" })
-        {
-            try
-            {
-                var genreIds = await MapGenresAndMoodsToIds(intent.Genres, intent.Moods, mediaType, cancellationToken);
-                
-                var discoverQuery = new DiscoverQuery(
-                    mediaType,
-                    genreIds,
-                    intent.YearFrom,
-                    intent.YearTo,
-                    intent.RuntimeMaxMinutes,
-                    "popularity.desc"
-                );
-
-                var result = await _tmdb.DiscoverAsync(discoverQuery, cancellationToken);
-                hits.AddRange(ConvertDiscoverResultToHits(result, mediaType, "discovery"));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error during discovery search for media type: {MediaType}", mediaType);
-            }
-        }
-
-        return hits;
-    }
-
-    private async Task<IEnumerable<TmdbTitleResult>> FindExactTitleMatchesAsync(IReadOnlyList<string> titles, CancellationToken cancellationToken)
-    {
-        var exactMatches = new List<TmdbTitleResult>();
-
-        foreach (var title in titles)
-        {
-            try
-            {
-                var exactMatch = await _tmdb.FindExactTitleAsync(title, cancellationToken);
-                if (exactMatch != null)
-                {
-                    exactMatches.Add(exactMatch);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error finding exact match for title: {Title}", title);
-            }
-        }
-
-        return exactMatches;
-    }
-
-    private async Task<IEnumerable<SearchHit>> ExecuteRelatedSearchAsync(IEnumerable<TmdbTitleResult> exactMatches, CancellationToken cancellationToken)
-    {
-        var hits = new List<SearchHit>();
-
-        foreach (var match in exactMatches)
-        {
-            try
-            {
-                // Get recommendations
-                var recommendations = await _tmdb.GetRecommendationsAsync(match.MediaType, match.Id, cancellationToken);
-                hits.AddRange(ConvertRecommendationsToHits(recommendations, match.MediaType, "recommendations"));
-
-                // Get similar content
-                var similar = await _tmdb.GetSimilarAsync(match.MediaType, match.Id, cancellationToken);
-                hits.AddRange(ConvertSimilarToHits(similar, match.MediaType, "similar"));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error getting related content for {MediaType} {Id}", match.MediaType, match.Id);
-            }
-        }
-
-        return hits;
     }
 
     private async Task<List<int>> MapGenresAndMoodsToIds(IReadOnlyList<string> genres, IReadOnlyList<string> moods, string mediaType, CancellationToken cancellationToken)
@@ -373,175 +255,6 @@ public sealed class FlexiSearchCommandHandler : IRequestHandler<FlexiSearchComma
         return string.IsNullOrEmpty(posterPath) ? null : $"https://image.tmdb.org/t/p/w500{posterPath}";
     }
 
-    private static IEnumerable<RankedItem> ApplyMediaTypeFilter(IEnumerable<RankedItem> items, IReadOnlyList<string> requestedMediaTypes)
-    {
-        if (!requestedMediaTypes.Any())
-            return items; // No specific media type requested, return all
-
-        return items.Where(item => requestedMediaTypes.Contains(item.Hit.MediaType, StringComparer.OrdinalIgnoreCase));
-    }
-
-    /// <summary>
-    /// Targeted search strategy when user provides specific titles
-    /// 1. Find exact matches first
-    /// 2. If requesting suggestions, extract genres from exact matches and find similar content
-    /// 3. If no exact matches or requesting suggestions, do broader search
-    /// </summary>
-    private async Task<List<SearchHit>> ExecuteTargetedTitleSearchAsync(LlmIntent intent, CancellationToken cancellationToken)
-    {
-        var searchHits = new List<SearchHit>();
-        
-        // Step 1: Find exact title matches
-        var exactMatches = await FindExactTitleMatchesAsync(intent.Titles, cancellationToken);
-        
-        if (exactMatches.Any())
-        {
-            // Add exact matches with highest priority
-            var exactHits = ConvertExactMatchesToHits(exactMatches);
-            searchHits.AddRange(exactHits);
-            
-            _logger.LogInformation("Found {Count} exact title matches", exactMatches.Count());
-            
-            // Step 2: If requesting suggestions, find similar content based on exact matches
-            if (intent.IsRequestingSuggestions)
-            {
-                _logger.LogInformation("Finding similar content based on exact matches");
-                
-                // Extract genres from exact matches and find similar content
-                var genresFromMatches = await ExtractGenresFromMatches(exactMatches, cancellationToken);
-                var moods = intent.Moods.ToList(); // Use user-provided moods
-                
-                // Search for similar content using extracted genres + user moods
-                var similarHits = await SearchBySimilarGenres(genresFromMatches, moods, intent.MediaTypes, cancellationToken);
-                searchHits.AddRange(similarHits);
-                
-                // Also get recommendations and similar content from TMDb
-                var relatedHits = await ExecuteRelatedSearchAsync(exactMatches, cancellationToken);
-                searchHits.AddRange(relatedHits);
-            }
-            else
-            {
-                _logger.LogInformation("User not requesting suggestions, returning only exact matches");
-            }
-        }
-        else
-        {
-            // Step 3: No exact matches found, do broader search
-            _logger.LogInformation("No exact matches found, performing broader title search");
-            var directHits = await ExecuteDirectSearchAsync(intent, cancellationToken);
-            searchHits.AddRange(directHits);
-        }
-        
-        return searchHits;
-    }
-
-    /// <summary>
-    /// Search strategy when user provides genres/moods/people but no specific titles
-    /// </summary>
-    private async Task<List<SearchHit>> ExecuteGenreMoodSearchAsync(LlmIntent intent, CancellationToken cancellationToken)
-    {
-        var searchHits = new List<SearchHit>();
-        
-        _logger.LogInformation("Searching by genres/moods/people without specific titles");
-        
-        // Search by people first (highest relevance)
-        if (intent.People.Any())
-        {
-            foreach (var person in intent.People)
-            {
-                try
-                {
-                    var result = await _tmdb.SearchMultiAsync(person, cancellationToken);
-                    var filteredHits = FilterHitsByMediaType(ConvertMultiResultToHits(result, "direct_person"), intent.MediaTypes);
-                    searchHits.AddRange(filteredHits);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Error searching for person: {Person}", person);
-                }
-            }
-        }
-        
-        // Search by genres and moods
-        if (intent.Genres.Any() || intent.Moods.Any())
-        {
-            var discoveryHits = await ExecuteDiscoverySearchAsync(intent, cancellationToken);
-            searchHits.AddRange(discoveryHits);
-        }
-        
-        return searchHits;
-    }
-
-    /// <summary>
-    /// Extract genres from exact TMDb matches to find similar content
-    /// </summary>
-    private Task<List<string>> ExtractGenresFromMatches(IEnumerable<TmdbTitleResult> exactMatches, CancellationToken cancellationToken)
-    {
-        var extractedGenres = new HashSet<string>();
-        
-        foreach (var match in exactMatches)
-        {
-            try
-            {
-                // Get detailed information for this title to extract genres
-                // For now, we'll use a simple mapping based on common patterns
-                // In a real implementation, you'd call TMDb's details endpoint
-                var genresFromTitle = ExtractGenresFromTitleAndOverview(match.Name, match.Overview);
-                foreach (var genre in genresFromTitle)
-                {
-                    extractedGenres.Add(genre);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error extracting genres from match: {Title}", match.Name);
-            }
-        }
-        
-        _logger.LogInformation("Extracted genres from exact matches: {Genres}", string.Join(", ", extractedGenres));
-        return Task.FromResult(extractedGenres.ToList());
-    }
-
-    /// <summary>
-    /// Search for content with similar genres/moods
-    /// </summary>
-    private async Task<List<SearchHit>> SearchBySimilarGenres(List<string> genres, List<string> moods, IReadOnlyList<string> mediaTypes, CancellationToken cancellationToken)
-    {
-        var hits = new List<SearchHit>();
-        
-        var targetMediaTypes = mediaTypes.Any() ? mediaTypes : new[] { "movie", "tv" };
-        
-        foreach (var mediaType in targetMediaTypes)
-        {
-            try
-            {
-                var genreIds = await MapGenresAndMoodsToIds(genres, moods, mediaType, cancellationToken);
-                
-                if (genreIds.Any())
-                {
-                    var discoverQuery = new DiscoverQuery(
-                        mediaType,
-                        genreIds,
-                        null, // No year constraints for similar content
-                        null,
-                        null, // No runtime constraints for similar content
-                        "vote_average.desc" // Sort by rating for quality similar content
-                    );
-
-                    var result = await _tmdb.DiscoverAsync(discoverQuery, cancellationToken);
-                    var similarHits = ConvertDiscoverResultToHits(result, mediaType, "similar_genres");
-                    hits.AddRange(similarHits);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error searching similar genres for media type: {MediaType}", mediaType);
-            }
-        }
-        
-        return hits;
-    }
-
     /// <summary>
     /// Simple genre extraction from title and overview text
     /// </summary>
@@ -552,16 +265,24 @@ public sealed class FlexiSearchCommandHandler : IRequestHandler<FlexiSearchComma
         
         var genreKeywords = new Dictionary<string, string[]>
         {
-            ["action"] = new[] { "action", "fight", "battle", "war", "combat", "spy", "agent" },
-            ["comedy"] = new[] { "comedy", "funny", "humor", "laugh", "comic", "hilarious" },
-            ["drama"] = new[] { "drama", "emotional", "life", "family", "relationship" },
-            ["thriller"] = new[] { "thriller", "suspense", "mystery", "investigation", "crime" },
-            ["horror"] = new[] { "horror", "scary", "fear", "terror", "haunted", "zombie" },
-            ["romance"] = new[] { "romance", "love", "romantic", "relationship", "wedding" },
-            ["science fiction"] = new[] { "sci-fi", "space", "future", "alien", "robot", "technology" },
-            ["fantasy"] = new[] { "fantasy", "magic", "wizard", "dragon", "mythical", "supernatural" },
-            ["adventure"] = new[] { "adventure", "journey", "quest", "treasure", "expedition" },
-            ["animation"] = new[] { "animated", "cartoon", "animation" }
+            ["action"] = new[] { "action", "fight", "battle", "war", "combat", "spy", "agent", "martial arts", "gun", "explosion", "assassin", "soldier" },
+            ["adventure"] = new[] { "adventure", "journey", "quest", "treasure", "expedition", "explore", "survival", "voyage" },
+            ["animation"] = new[] { "animated", "cartoon", "animation", "pixar", "disney", "stop-motion", "cgi" },
+            ["biography"] = new[] { "biopic", "based on true story", "real life", "inspired by", "historical figure" },
+            ["comedy"] = new[] { "comedy", "funny", "humor", "laugh", "comic", "hilarious", "parody", "satire", "rom-com" },
+            ["crime"] = new[] { "crime", "gangster", "mafia", "heist", "detective", "mob", "law", "courtroom", "trial" },
+            ["documentary"] = new[] { "documentary", "true story", "docuseries", "nonfiction", "based on real events" },
+            ["drama"] = new[] { "drama", "emotional", "life", "family", "relationship", "tragedy", "society", "struggle", "character-driven" },
+            ["fantasy"] = new[] { "fantasy", "magic", "wizard", "dragon", "mythical", "supernatural", "sorcery", "fairy tale", "elves", "orcs" },
+            ["historical"] = new[] { "historical", "period drama", "medieval", "ancient", "renaissance", "victorian", "war history" },
+            ["horror"] = new[] { "horror", "scary", "fear", "terror", "haunted", "zombie", "ghost", "vampire", "slasher", "monster", "demon", "possession" },
+            ["musical"] = new[] { "musical", "songs", "dance", "singing", "broadway", "opera" },
+            ["romance"] = new[] { "romance", "love", "romantic", "relationship", "wedding", "affair", "heartbreak", "valentine", "rom-com" },
+            ["science fiction"] = new[] { "sci-fi", "science fiction", "space", "future", "alien", "robot", "technology", "dystopian", "cyberpunk", "time travel" },
+            ["sports"] = new[] { "sports", "football", "soccer", "basketball", "cricket", "baseball", "athlete", "team", "tournament" },
+            ["thriller"] = new[] { "thriller", "suspense", "mystery", "investigation", "crime", "psychological", "dark", "chase", "conspiracy" },
+            ["war"] = new[] { "war", "military", "battlefield", "soldier", "army", "world war", "veteran", "conflict" },
+            ["western"] = new[] { "western", "cowboy", "gunslinger", "sheriff", "saloon", "duel", "outlaw", "frontier" }
         };
         
         foreach (var (genre, keywords) in genreKeywords)
@@ -584,5 +305,251 @@ public sealed class FlexiSearchCommandHandler : IRequestHandler<FlexiSearchComma
             return hits; // No specific media type requested, return all
 
         return hits.Where(hit => requestedMediaTypes.Contains(hit.MediaType, StringComparer.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Extract genre IDs from provided titles by searching TMDb and getting their detailed information
+    /// </summary>
+    private async Task<List<int>> ExtractGenresFromTitlesAsync(IReadOnlyList<string> titles, IReadOnlyList<string> mediaTypes, CancellationToken cancellationToken)
+    {
+        var genreIds = new HashSet<int>();
+        
+        foreach (var title in titles)
+        {
+            try
+            {
+                // Search for the title to get basic info
+                var searchResult = await _tmdb.SearchMultiAsync(title, cancellationToken);
+                
+                // For each result, get detailed information with actual genres from TMDb
+                foreach (var result in searchResult.Results.Take(3)) // Limit to top 3 matches per title
+                {
+                    try
+                    {
+                        // Filter by requested media types if specified
+                        var targetMediaTypes = mediaTypes.Any() ? mediaTypes : new[] { "movie", "tv" };
+                        if (!targetMediaTypes.Contains(result.MediaType, StringComparer.OrdinalIgnoreCase))
+                            continue;
+
+                        // Get detailed information based on media type
+                        if (result.MediaType.Equals("movie", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var movieDetails = await _tmdb.GetMovieDetailsAsync(result.Id, cancellationToken);
+                            if (movieDetails?.Genres != null)
+                            {
+                                foreach (var genre in movieDetails.Genres)
+                                {
+                                    genreIds.Add(genre.Id);
+                                }
+                                _logger.LogDebug("Extracted {Count} genres from movie: {Title}", movieDetails.Genres.Count, movieDetails.Title);
+                            }
+                        }
+                        else if (result.MediaType.Equals("tv", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var tvDetails = await _tmdb.GetTvDetailsAsync(result.Id, cancellationToken);
+                            if (tvDetails?.Genres != null)
+                            {
+                                foreach (var genre in tvDetails.Genres)
+                                {
+                                    genreIds.Add(genre.Id);
+                                }
+                                _logger.LogDebug("Extracted {Count} genres from TV series: {Name}", tvDetails.Genres.Count, tvDetails.Name);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Error getting details for {MediaType} ID {Id}: {Title}", 
+                            result.MediaType, result.Id, result.Name ?? result.Title);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error searching for title: {Title}", title);
+            }
+        }
+        
+        _logger.LogInformation("Extracted {Count} unique genre IDs from {TitleCount} titles", genreIds.Count, titles.Count);
+        return genreIds.ToList();
+    }
+
+    /// <summary>
+    /// Extract genre IDs from user's genres and moods in the intent
+    /// </summary>
+    private async Task<List<int>> ExtractGenresFromIntentAsync(LlmIntent intent, CancellationToken cancellationToken)
+    {
+        var genreIds = new List<int>();
+        var targetMediaTypes = intent.MediaTypes.Any() ? intent.MediaTypes : new[] { "movie", "tv" };
+        
+        foreach (var mediaType in targetMediaTypes)
+        {
+            try
+            {
+                var genreIdsForMediaType = await MapGenresAndMoodsToIds(intent.Genres, intent.Moods, mediaType, cancellationToken);
+                genreIds.AddRange(genreIdsForMediaType);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error extracting genres from intent for media type: {MediaType}", mediaType);
+            }
+        }
+        
+        // Remove duplicates
+        return genreIds.Distinct().ToList();
+    }
+
+    /// <summary>
+    /// Find top 100 movies/TV shows matching the requested genres
+    /// </summary>
+    private async Task<List<SearchHit>> FindTop100MoviesForGenresAsync(List<int> requestedGenres, IReadOnlyList<string> mediaTypes, CancellationToken cancellationToken)
+    {
+        var searchHits = new List<SearchHit>();
+        var targetMediaTypes = mediaTypes.Any() ? mediaTypes : new[] { "movie", "tv" };
+        
+        foreach (var mediaType in targetMediaTypes)
+        {
+            try
+            {
+                // Create multiple discover queries with different sorting to get variety
+                var discoverQueries = new[]
+                {
+                    new DiscoverQuery(
+                        MediaType: mediaType,
+                        GenreIds: requestedGenres,
+                        SortBy: "popularity.desc",
+                        VoteCountGte: 100
+                    ),
+                    new DiscoverQuery(
+                        MediaType: mediaType,
+                        GenreIds: requestedGenres,
+                        SortBy: "vote_average.desc",
+                        VoteCountGte: 500
+                    ),
+                    new DiscoverQuery(
+                        MediaType: mediaType,
+                        GenreIds: requestedGenres,
+                        SortBy: "release_date.desc",
+                        VoteCountGte: 50
+                    )
+                };
+
+                foreach (var query in discoverQueries)
+                {
+                    try
+                    {
+                        var result = await _tmdb.DiscoverAsync(query, cancellationToken);
+                        var hits = ConvertDiscoverResultToHits(result, mediaType, $"genre_discovery_{query.SortBy}");
+                        searchHits.AddRange(hits);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Error in discover query for {MediaType} with sort {SortBy}", mediaType, query.SortBy);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error finding movies for genres in media type: {MediaType}", mediaType);
+            }
+        }
+        
+        // Remove duplicates based on TMDb ID and media type
+        var uniqueHits = searchHits
+            .GroupBy(hit => new { hit.TmdbId, hit.MediaType })
+            .Select(group => group.First())
+            .Take(100)
+            .ToList();
+        
+        _logger.LogInformation("Found {Count} unique movies/shows for requested genres", uniqueHits.Count);
+        return uniqueHits;
+    }
+
+    /// <summary>
+    /// Rank results by description match, then rating, then year
+    /// </summary>
+    private List<RankedItem> RankByDescriptionRatingYear(List<SearchHit> searchHits, LlmIntent intent)
+    {
+        var queryText = string.Join(" ", intent.Titles.Concat(intent.Genres).Concat(intent.Moods).Concat(intent.People)).ToLowerInvariant();
+        
+        return searchHits.Select(hit => 
+        {
+            var score = CalculateDescriptionMatchScore(hit, queryText, intent);
+            var reasoning = BuildReasoning(hit, score, intent);
+            
+            return new RankedItem(hit, score, reasoning);
+        })
+        .OrderByDescending(item => item.Score) // Description match score (primary)
+        .ThenByDescending(item => item.Hit.Rating ?? 0) // Rating (secondary)
+        .ThenByDescending(item => item.Hit.Year ?? 0) // Year (tertiary)
+        .ToList();
+    }
+
+    /// <summary>
+    /// Calculate description match score based on query terms found in title/overview
+    /// </summary>
+    private static double CalculateDescriptionMatchScore(SearchHit hit, string queryText, LlmIntent intent)
+    {
+        var score = 0.0;
+        var searchableText = $"{hit.Name} {hit.Overview}".ToLowerInvariant();
+        
+        // Base score from rating (normalized to 0-1)
+        score += (hit.Rating ?? 0) / 10.0;
+        
+        // Bonus for year recency (movies from last 20 years get bonus)
+        if (hit.Year.HasValue && hit.Year.Value >= DateTime.Now.Year - 20)
+        {
+            score += 0.2;
+        }
+        
+        // Text matching bonuses
+        var queryWords = queryText.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var matchedWords = queryWords.Count(word => word.Length > 2 && searchableText.Contains(word));
+        score += (double)matchedWords / Math.Max(queryWords.Length, 1) * 2.0; // Up to 2 points for text matches
+        
+        // Genre matching bonus (if we can determine genres from signals)
+        if (hit.Signals.TryGetValue("genre_ids", out var genreIdsObj) && genreIdsObj is int[] genreIds)
+        {
+            // This would require mapping back from genre IDs to names for comparison
+            // For now, we'll give a small bonus for having genre metadata
+            score += 0.1;
+        }
+        
+        return score;
+    }
+
+    /// <summary>
+    /// Build reasoning text for why this result was ranked as it was
+    /// </summary>
+    private static string BuildReasoning(SearchHit hit, double score, LlmIntent intent)
+    {
+        var reasons = new List<string>();
+        
+        if (hit.Rating.HasValue && hit.Rating.Value >= 7.0)
+        {
+            reasons.Add($"High rating ({hit.Rating.Value:F1})");
+        }
+        
+        if (hit.Year.HasValue && hit.Year.Value >= DateTime.Now.Year - 5)
+        {
+            reasons.Add("Recent release");
+        }
+        
+        var searchableText = $"{hit.Name} {hit.Overview}".ToLowerInvariant();
+        var queryTerms = string.Join(" ", intent.Titles.Concat(intent.Genres).Concat(intent.Moods)).ToLowerInvariant();
+        var queryWords = queryTerms.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var matchedWords = queryWords.Count(word => word.Length > 2 && searchableText.Contains(word));
+        
+        if (matchedWords > 0)
+        {
+            reasons.Add($"Matches {matchedWords} query terms");
+        }
+        
+        if (hit.Signals.TryGetValue("source", out var source))
+        {
+            reasons.Add($"Found via {source}");
+        }
+        
+        return reasons.Any() ? string.Join(", ", reasons) : "General match";
     }
 }
